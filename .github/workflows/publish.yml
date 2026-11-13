@@ -4,16 +4,17 @@
 #   assemble  everything checkable without a secret: rules, keys.json against the root keys,
 #             every download including the mirror;
 #   sign      in the environment "catalog-signing", which waits for the owner's approval; the
-#             signing key comes from Bitwarden Secrets Manager and signs exactly the bytes the
-#             first job checked (S-17, S-18);
+#             signing key comes from Bitwarden Secrets Manager (in the test phase from an
+#             environment secret) and signs exactly the bytes the first job checked (S-17, S-18);
 #   deploy    the Pages artifact, so nothing is ever written to a branch (D-05);
 # then confirm reads the files back from catalog.miralsoft.com and compares them by hash (D-07,
 # D-16).
 #
 # Repository settings this needs (owner):
-#   environment "catalog-signing": required reviewer the owner; secret BWS_ACCESS_TOKEN (machine
-#   account with read access to the signing key only); variables BWS_SIGNING_KEY_ID and
-#   BWS_CLOUD_REGION ("eu" or "us").
+#   environment "catalog-signing": required reviewer the owner, deployments from main only;
+#   secret BWS_ACCESS_TOKEN (machine account with read access to the signing key only) and
+#   variables BWS_SIGNING_KEY_ID and BWS_CLOUD_REGION ("eu" or "us"); in the test phase instead
+#   only the secret CATALOG_SIGNING_KEY holding the test signing key.
 #   Pages: source "GitHub Actions", custom domain catalog.miralsoft.com, HTTPS enforced.
 
 name: Publish catalog
@@ -28,7 +29,7 @@ on:
       - programs/**
       - keys/**
       - settings.json
-      - catalogtool.env
+      - hosting.env
   workflow_dispatch:
 
 # One publication at a time, and a waiting one is never cancelled by the next.
@@ -125,19 +126,41 @@ jobs:
       - id: tool
         uses: ./.github/actions/catalogtool
 
-      - name: Settings for Bitwarden are present
+      # Where the signing key comes from. Bitwarden Secrets Manager is the target (S-18,
+      # decision 2026-10-29): it is used as soon as BWS_SIGNING_KEY_ID is set. Until then, in the
+      # test phase only, the test signing key is the environment secret CATALOG_SIGNING_KEY
+      # (decision 2026-11-13). The real signing key never goes there. Exactly one source is
+      # allowed, so a forgotten test secret cannot sign beside Bitwarden.
+      - id: source
+        name: Source of the signing key
         env:
           KEY_ID: ${{ vars.BWS_SIGNING_KEY_ID }}
           REGION: ${{ vars.BWS_CLOUD_REGION }}
+          HAS_SECRET: ${{ secrets.CATALOG_SIGNING_KEY != '' }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$KEY_ID" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
-            echo "::error::The environment variable BWS_SIGNING_KEY_ID is not a secret ID."
+          if [ -n "$KEY_ID" ]; then
+            if [ "$HAS_SECRET" = true ]; then
+              echo "::error::BWS_SIGNING_KEY_ID is set and the environment secret CATALOG_SIGNING_KEY still exists. Delete the secret."
+              exit 1
+            fi
+            if ! printf '%s' "$KEY_ID" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
+              echo "::error::The environment variable BWS_SIGNING_KEY_ID is not a secret ID."
+              exit 1
+            fi
+            case "$REGION" in eu|us) ;; *) echo "::error::BWS_CLOUD_REGION must be eu or us."; exit 1 ;; esac
+            echo "Signing key from Bitwarden Secrets Manager."
+            echo "bitwarden=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_SECRET" = true ]; then
+            echo "::warning::Test phase: signing with the environment secret CATALOG_SIGNING_KEY, not with Bitwarden."
+            echo "bitwarden=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No signing key: set BWS_SIGNING_KEY_ID or, in the test phase, the environment secret CATALOG_SIGNING_KEY."
             exit 1
           fi
-          case "$REGION" in eu|us) ;; *) echo "::error::BWS_CLOUD_REGION must be eu or us."; exit 1 ;; esac
 
       - name: Signing key from Bitwarden Secrets Manager
+        if: steps.source.outputs.bitwarden == 'true'
         uses: bitwarden/sm-action@1238aae8fc64b212641190a9227c8a734ab1a793 # v3.0.1
         with:
           access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
@@ -148,8 +171,13 @@ jobs:
       - name: Sign and verify
         env:
           TOOL: ${{ steps.tool.outputs.path }}
+          TEST_KEY: ${{ steps.source.outputs.bitwarden == 'false' && secrets.CATALOG_SIGNING_KEY || '' }}
         run: |
           set -euo pipefail
+          if [ -n "$TEST_KEY" ]; then
+            export CATALOG_SIGNING_KEY="$TEST_KEY"
+          fi
+          unset TEST_KEY
           "$TOOL" sign --file out/catalog.json --key-env CATALOG_SIGNING_KEY
           mapfile -t roots < <(grep -Ev '^[[:space:]]*(#|$)' keys/root-keys.txt)
           args=()
