@@ -1,5 +1,5 @@
 # Proposes a new MIRAL Deploy CLI for the catalog (decision 2026-11-05). The deploy script on the
-# hosting writes https://deploy.miralsoft.com/cli/latest.json in exactly the normal form of
+# hosting writes <DEPLOY_BASE>cli/latest.json (hosting.env) in exactly the normal form of
 # programs/cli.json. This workflow reads it, checks it with the CatalogTool, including the
 # download and the hash of the served file, and when it names a newer version opens a pull
 # request with the file unchanged. Merging that pull request and approving the signing stay with
@@ -43,11 +43,12 @@ jobs:
         name: Read and check cli/latest.json
         env:
           TOOL: ${{ steps.tool.outputs.path }}
+          BASE: ${{ steps.tool.outputs.deploy-base }}
         run: |
           set -euo pipefail
           work="$(mktemp -d)"
           curl --proto '=https' --fail --silent --show-error --max-redirs 0 --max-filesize 65536 \
-            --output "$work/latest.json" https://deploy.miralsoft.com/cli/latest.json
+            --output "$work/latest.json" "${BASE}cli/latest.json"
 
           version="$(jq -r '.version' "$work/latest.json")"
           url="$(jq -r '.url' "$work/latest.json")"
@@ -56,7 +57,7 @@ jobs:
             exit 1
           fi
           # The bootstrap accepts the CLI only from its own domain (decision 2026-11-04).
-          if [ "$url" != "https://deploy.miralsoft.com/cli/$version/MiralDeploy.Cli.exe" ]; then
+          if [ "$url" != "${BASE}cli/$version/MiralDeploy.Cli.exe" ]; then
             echo "::error::latest.json names '$url', not the CLI's place for version $version."
             exit 1
           fi
@@ -75,7 +76,7 @@ jobs:
             if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -t . -n -k1,1 -k2,2 -k3,3 -k4,4 | tail -n 1)" = "$current" ]; then
               newer=false
             fi
-            echo "In the catalog: $current. On deploy.miralsoft.com: $version."
+            echo "In the catalog: $current. On ${BASE}: $version."
           fi
           if [ "$newer" = true ] && git ls-remote --exit-code --heads origin "cli/$version" > /dev/null; then
             echo "A pull request branch for $version exists already."
@@ -126,4 +127,4 @@ jobs:
           git push "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "cli/$VERSION"
           gh pr create --repo "$REPO" --base main --head "cli/$VERSION" \
             --title "Point the catalog to MIRAL Deploy CLI $VERSION" \
-            --body "deploy.miralsoft.com/cli/latest.json names CLI $VERSION. The file is taken unchanged; the catalog checks download the served CLI and compare its SHA-256. Merging this and approving the signing publishes it to every PC on its next run."
+            --body "cli/latest.json on the download host names CLI $VERSION. The file is taken unchanged; the catalog checks download the served CLI and compare its SHA-256. Merging this and approving the signing publishes it to every PC on its next run."
