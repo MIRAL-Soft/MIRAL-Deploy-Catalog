@@ -1,0 +1,8 @@
+# Public root keys of MIRAL Deploy, one per line, as Base64 of the uncompressed P-256 point
+# (the "publicKey" line of CatalogTool generate-key). The active root key first, then the
+# reserve root key. They must equal the keys built into the bootstrap and RootKeys.cs.
+#
+# Used only by `CatalogTool verify` in the publishing workflow. The private halves are kept
+# offline by the owner and never come near this repository.
+#
+# Empty until the owner generates the real keys: publishing refuses to run without them.
