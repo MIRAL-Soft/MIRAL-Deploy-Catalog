@@ -1,0 +1,18 @@
+# MIRAL Soft enforcement configuration, read by the git hooks and by
+# .github/workflows/content-checks.yml, so the local and the server-side checks cover the same
+# files (R-17).
+
+# R-03, R-19: a business project of the owner.
+OWNER_NAME=MIRAL Soft
+OWNER_EMAIL=20637644+miralsoft@users.noreply.github.com
+
+# The owner's GitHub account under its display name, which GitHub writes as committer when it
+# merges a pull request.
+ALLOWED_IDENTITY=Michael Tosch <20637644+miralsoft@users.noreply.github.com>
+
+# The bot of the GitHub App that proposes CLI updates (cli-update.yml) is declared here once the
+# app exists, with the exact name and address GitHub gives it. Not before: nothing is invented.
+
+# Prose for people, checked for em-dashes (I-02): documents and the catalog texts.
+CONTENT_GLOBS=*.md *.json
+CONTENT_EXCLUDE=
