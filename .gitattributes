@@ -1,0 +1,4 @@
+# Every text file is stored and checked out with LF, also on Windows with core.autocrlf.
+# The catalog files have a normal form with LF line ends (CatalogReader.WriteItem), and a
+# conversion on checkout would change bytes that are signed and compared.
+* text=auto eol=lf

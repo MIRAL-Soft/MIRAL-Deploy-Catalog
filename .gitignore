@@ -1,0 +1,11 @@
+# Private keys never belong here (S-02). generate-key writes PKCS#8 PEM files.
+*.pem
+*.key
+*.p8
+
+# Working folders of the workflows and of local checks.
+/tools/
+/out/
+/site/
+
+# The foundation clone is excluded through .git/info/exclude, not here (M-12).
