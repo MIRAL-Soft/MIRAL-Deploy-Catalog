@@ -1,0 +1,123 @@
+# Catalog checks for every pull request and every push: the catalog rules through the pinned
+# CatalogTool, the downloads and hashes of the packages a change touches, and a dry run of the
+# whole signing chain with keys made up for the run.
+#
+# Never pull_request_target: a pull request from a fork runs here with a read-only token and no
+# secret, and that is how it stays (S-03).
+
+name: Catalog checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: catalog-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  catalog:
+    name: Catalog checks
+    runs-on: ubuntu-24.04
+    steps:
+      # Pinned to a commit, as in content-checks.yml (S-13). Full history for the diff below.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: tool
+        uses: ./.github/actions/catalogtool
+
+      - name: Catalog rules
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: '"$TOOL" check --repo .'
+
+      # Only the packages a change touches are downloaded, otherwise every pull request would
+      # fetch every installer (decision 2026-11-04). Mirror files are checked at publishing.
+      - name: Downloads and hashes of the changed packages
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) base="" ;;
+          esac
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            # A new branch has no earlier commit of its own: compare with where it left main.
+            base="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+          fi
+          if [ -z "$base" ]; then
+            echo "No earlier commit to compare with: every package and the CLI entry are checked."
+            "$TOOL" check --repo . --online
+            exit 0
+          fi
+
+          args=()
+          while IFS= read -r file; do
+            case "$file" in
+              packages/*.json)
+                id="${file#packages/}"; id="${id%.json}"
+                if ! printf '%s' "$id" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$'; then
+                  echo "::error file=$file::'$id' is not a valid package ID."
+                  exit 1
+                fi
+                args+=(--only "$id") ;;
+              programs/cli.json) args+=(--only programs.cli) ;;
+            esac
+          done < <(git diff --name-only --diff-filter=AMR "$base" HEAD)
+
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "This change touches no package and no CLI entry: nothing to download."
+            exit 0
+          fi
+          "$TOOL" check --repo . --online "${args[@]}"
+
+      # The signing chain end to end with throwaway keys (tests/chain/README.md). It first has to
+      # refuse a tampered catalog and a wrong root key (R-20), then accept the real thing.
+      - name: Signing chain dry run
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+
+          public_key() { "$TOOL" generate-key --out "$1" | sed -n 's/^publicKey: *//p'; }
+          root="$(public_key "$work/root.pem")"
+          other="$(public_key "$work/other.pem")"
+          signing="$(public_key "$work/signing.pem")"
+
+          "$TOOL" create-keys --version 1 --key "$signing" --out "$work/keys.json"
+          "$TOOL" sign --file "$work/keys.json" --key-file "$work/root.pem"
+          "$TOOL" assemble --repo tests/chain --version "$(date -u +%Y%m%d%H%M%S)" --out "$work/catalog.json"
+          "$TOOL" sign --file "$work/catalog.json" --key-file "$work/signing.pem"
+
+          mkdir "$work/tampered"
+          cp "$work/keys.json" "$work/keys.json.sig" "$work/catalog.json.sig" "$work/tampered/"
+          sed 's/"mirrorBase": "https:\/\/deploy/"mirrorBase": "https:\/\/evil/' "$work/catalog.json" > "$work/tampered/catalog.json"
+          if cmp -s "$work/catalog.json" "$work/tampered/catalog.json"; then
+            echo "::error::The dry run could not tamper with the catalog; the test itself is broken."
+            exit 1
+          fi
+          if "$TOOL" verify --keys "$work/tampered/keys.json" --root "$root" --catalog "$work/tampered/catalog.json"; then
+            echo "::error::verify accepted a tampered catalog."
+            exit 1
+          fi
+          if "$TOOL" verify --keys "$work/keys.json" --root "$other"; then
+            echo "::error::verify accepted keys.json signed by another root key."
+            exit 1
+          fi
+
+          "$TOOL" verify --keys "$work/keys.json" --root "$root" --catalog "$work/catalog.json"
+          echo "Signing chain dry run passed: tampering and a wrong root refused, the real chain accepted."
