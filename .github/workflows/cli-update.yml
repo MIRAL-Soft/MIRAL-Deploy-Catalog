@@ -1,0 +1,129 @@
+# Proposes a new MIRAL Deploy CLI for the catalog (decision 2026-11-05). The deploy script on the
+# hosting writes https://deploy.miralsoft.com/cli/latest.json in exactly the normal form of
+# programs/cli.json. This workflow reads it, checks it with the CatalogTool, including the
+# download and the hash of the served file, and when it names a newer version opens a pull
+# request with the file unchanged. Merging that pull request and approving the signing stay with
+# the owner, so nobody with access to the hosting alone can ship a CLI.
+#
+# The pull request is opened by a GitHub App limited to this repository, because a pull request
+# opened with GITHUB_TOKEN starts no workflow and its required checks would never report.
+#
+# Repository settings this needs (owner): secret BWS_CLI_UPDATE_TOKEN (a machine account that
+# reads only the app's private key); variables BWS_APP_KEY_ID, BWS_CLOUD_REGION ("eu" or "us")
+# and CLI_UPDATE_APP_CLIENT_ID.
+
+name: CLI update
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: cli-update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  propose:
+    name: Propose a newer CLI
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - id: tool
+        uses: ./.github/actions/catalogtool
+
+      - id: latest
+        name: Read and check cli/latest.json
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          curl --proto '=https' --fail --silent --show-error --max-redirs 0 --max-filesize 65536 \
+            --output "$work/latest.json" https://deploy.miralsoft.com/cli/latest.json
+
+          version="$(jq -r '.version' "$work/latest.json")"
+          url="$(jq -r '.url' "$work/latest.json")"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+(\.[0-9]+)*$'; then
+            echo "::error::latest.json names no valid version."
+            exit 1
+          fi
+          # The bootstrap accepts the CLI only from its own domain (decision 2026-11-04).
+          if [ "$url" != "https://deploy.miralsoft.com/cli/$version/MiralDeploy.Cli.exe" ]; then
+            echo "::error::latest.json names '$url', not the CLI's place for version $version."
+            exit 1
+          fi
+
+          # The catalog as it would be after the change, checked offline and online.
+          mkdir "$work/repo"
+          git archive HEAD | tar -x -C "$work/repo"
+          mkdir -p "$work/repo/programs"
+          cp "$work/latest.json" "$work/repo/programs/cli.json"
+          "$TOOL" check --repo "$work/repo" --online --only programs.cli
+
+          newer=true
+          if [ -f programs/cli.json ]; then
+            current="$(jq -r '.version' programs/cli.json)"
+            # Segment by segment as numbers, as the catalog compares versions.
+            if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -t . -n -k1,1 -k2,2 -k3,3 -k4,4 | tail -n 1)" = "$current" ]; then
+              newer=false
+            fi
+            echo "In the catalog: $current. On deploy.miralsoft.com: $version."
+          fi
+          if [ "$newer" = true ] && git ls-remote --exit-code --heads origin "cli/$version" > /dev/null; then
+            echo "A pull request branch for $version exists already."
+            newer=false
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "newer=$newer" >> "$GITHUB_OUTPUT"
+          echo "file=$work/latest.json" >> "$GITHUB_OUTPUT"
+
+      - name: App key from Bitwarden Secrets Manager
+        if: steps.latest.outputs.newer == 'true'
+        uses: bitwarden/sm-action@1238aae8fc64b212641190a9227c8a734ab1a793 # v3.0.1
+        with:
+          access_token: ${{ secrets.BWS_CLI_UPDATE_TOKEN }}
+          cloud_region: ${{ vars.BWS_CLOUD_REGION }}
+          secrets: |
+            ${{ vars.BWS_APP_KEY_ID }} > CLI_UPDATE_APP_KEY
+
+      - id: app
+        if: steps.latest.outputs.newer == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.CLI_UPDATE_APP_CLIENT_ID }}
+          private-key: ${{ env.CLI_UPDATE_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open the pull request
+        if: steps.latest.outputs.newer == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+          VERSION: ${{ steps.latest.outputs.version }}
+          FILE: ${{ steps.latest.outputs.file }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bot="${SLUG}[bot]"
+          id="$(gh api "/users/$bot" --jq .id)"
+          git config user.name "$bot"
+          git config user.email "$id+$bot@users.noreply.github.com"
+
+          git switch -c "cli/$VERSION"
+          mkdir -p programs
+          cp "$FILE" programs/cli.json
+          git add programs/cli.json
+          git commit -m "Point the catalog to MIRAL Deploy CLI $VERSION"
+          git push "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "cli/$VERSION"
+          gh pr create --repo "$REPO" --base main --head "cli/$VERSION" \
+            --title "Point the catalog to MIRAL Deploy CLI $VERSION" \
+            --body "deploy.miralsoft.com/cli/latest.json names CLI $VERSION. The file is taken unchanged; the catalog checks download the served CLI and compare its SHA-256. Merging this and approving the signing publishes it to every PC on its next run."
