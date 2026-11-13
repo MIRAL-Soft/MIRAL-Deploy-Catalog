@@ -1,0 +1,216 @@
+# Assembles, signs and publishes the catalog on GitHub Pages as catalog.miralsoft.com.
+#
+# Three steps, in this order and each in its own job:
+#   assemble  everything checkable without a secret: rules, keys.json against the root keys,
+#             every download including the mirror;
+#   sign      in the environment "catalog-signing", which waits for the owner's approval; the
+#             signing key comes from Bitwarden Secrets Manager and signs exactly the bytes the
+#             first job checked (S-17, S-18);
+#   deploy    the Pages artifact, so nothing is ever written to a branch (D-05);
+# then confirm reads the files back from catalog.miralsoft.com and compares them by hash (D-07,
+# D-16).
+#
+# Repository settings this needs (owner):
+#   environment "catalog-signing": required reviewer the owner; secret BWS_ACCESS_TOKEN (machine
+#   account with read access to the signing key only); variables BWS_SIGNING_KEY_ID and
+#   BWS_CLOUD_REGION ("eu" or "us").
+#   Pages: source "GitHub Actions", custom domain catalog.miralsoft.com, HTTPS enforced.
+
+name: Publish catalog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/**
+      - profiles/**
+      - bloatware/**
+      - programs/**
+      - keys/**
+      - settings.json
+      - catalogtool.env
+  workflow_dispatch:
+
+# One publication at a time, and a waiting one is never cancelled by the next.
+concurrency:
+  group: publish-catalog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  assemble:
+    name: Assemble and check
+    runs-on: ubuntu-24.04
+    outputs:
+      sha256: ${{ steps.assemble.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - id: tool
+        uses: ./.github/actions/catalogtool
+
+      - name: Root keys and keys.json
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: |
+          set -euo pipefail
+          mapfile -t roots < <(grep -Ev '^[[:space:]]*(#|$)' keys/root-keys.txt || true)
+          if [ "${#roots[@]}" -eq 0 ]; then
+            echo "::error::keys/root-keys.txt holds no root key yet. Nothing is published before the real keys exist."
+            exit 1
+          fi
+          for file in keys/keys.json keys/keys.json.sig; do
+            if [ ! -f "$file" ]; then
+              echo "::error::$file is missing. Nothing is published before the owner signed keys.json."
+              exit 1
+            fi
+          done
+          args=()
+          for key in "${roots[@]}"; do args+=(--root "$key"); done
+          "$TOOL" verify --keys keys/keys.json "${args[@]}"
+
+      - id: assemble
+        name: Assemble
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: |
+          set -euo pipefail
+          "$TOOL" check --repo .
+          # The catalog version is the UTC time of assembling: it only ever rises and needs no
+          # stored state (decision 2026-11-13).
+          mkdir -p out
+          "$TOOL" assemble --repo . --version "$(date -u +%Y%m%d%H%M%S)" --out out/catalog.json
+          echo "sha256=$(sha256sum out/catalog.json | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      # Every package and the mirror, at the moment that counts: the mirror files were uploaded
+      # by the Catalog Editor before the pull request (decision 2026-11-04).
+      - name: Downloads and hashes of the whole catalog
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: '"$TOOL" check --catalog out/catalog.json --online --mirror'
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: assembled
+          path: out/catalog.json
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: Sign
+    needs: assemble
+    runs-on: ubuntu-24.04
+    environment: catalog-signing
+    outputs:
+      sums: ${{ steps.site.outputs.sums }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: assembled
+          path: out
+
+      - name: The catalog is the one that was checked
+        env:
+          EXPECTED: ${{ needs.assemble.outputs.sha256 }}
+        run: echo "$EXPECTED  out/catalog.json" | sha256sum --check --strict -
+
+      - id: tool
+        uses: ./.github/actions/catalogtool
+
+      - name: Settings for Bitwarden are present
+        env:
+          KEY_ID: ${{ vars.BWS_SIGNING_KEY_ID }}
+          REGION: ${{ vars.BWS_CLOUD_REGION }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$KEY_ID" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'; then
+            echo "::error::The environment variable BWS_SIGNING_KEY_ID is not a secret ID."
+            exit 1
+          fi
+          case "$REGION" in eu|us) ;; *) echo "::error::BWS_CLOUD_REGION must be eu or us."; exit 1 ;; esac
+
+      - name: Signing key from Bitwarden Secrets Manager
+        uses: bitwarden/sm-action@1238aae8fc64b212641190a9227c8a734ab1a793 # v3.0.1
+        with:
+          access_token: ${{ secrets.BWS_ACCESS_TOKEN }}
+          cloud_region: ${{ vars.BWS_CLOUD_REGION }}
+          secrets: |
+            ${{ vars.BWS_SIGNING_KEY_ID }} > CATALOG_SIGNING_KEY
+
+      - name: Sign and verify
+        env:
+          TOOL: ${{ steps.tool.outputs.path }}
+        run: |
+          set -euo pipefail
+          "$TOOL" sign --file out/catalog.json --key-env CATALOG_SIGNING_KEY
+          mapfile -t roots < <(grep -Ev '^[[:space:]]*(#|$)' keys/root-keys.txt)
+          args=()
+          for key in "${roots[@]}"; do args+=(--root "$key"); done
+          "$TOOL" verify --keys keys/keys.json "${args[@]}" --catalog out/catalog.json
+
+      # Exactly the four files the clients load, and their hashes for the confirmation.
+      - id: site
+        name: The site
+        run: |
+          set -euo pipefail
+          mkdir site
+          cp keys/keys.json keys/keys.json.sig out/catalog.json out/catalog.json.sig site/
+          sums="$(cd site && sha256sum keys.json keys.json.sig catalog.json catalog.json.sig | tr '\n' ';')"
+          echo "$sums"
+          echo "sums=$sums" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/
+
+  deploy:
+    name: Publish on GitHub Pages
+    needs: sign
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  confirm:
+    name: catalog.miralsoft.com serves the new files
+    needs: [sign, deploy]
+    runs-on: ubuntu-24.04
+    steps:
+      # A status code proves nothing (D-16): each file is downloaded and compared by hash. GitHub
+      # Pages may take a few minutes, so this waits up to ten minutes (D-02).
+      - name: Compare what is served with what was signed
+        env:
+          SUMS: ${{ needs.sign.outputs.sums }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SUMS" | tr ';' '\n' > expected.txt
+          mkdir served
+          for attempt in $(seq 1 20); do
+            ok=1
+            for file in keys.json keys.json.sig catalog.json catalog.json.sig; do
+              curl --proto '=https' --fail --silent --show-error --max-redirs 0 \
+                --max-filesize 50000000 --header 'Cache-Control: no-cache' \
+                --output "served/$file" "https://catalog.miralsoft.com/$file?attempt=$attempt" || ok=0
+            done
+            if [ "$ok" -eq 1 ] && (cd served && sha256sum --check --strict --quiet ../expected.txt); then
+              echo "catalog.miralsoft.com serves exactly the signed files (attempt $attempt)."
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::catalog.miralsoft.com does not serve the signed files after ten minutes."
+          exit 1
