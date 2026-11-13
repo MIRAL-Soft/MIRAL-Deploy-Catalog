@@ -1,6 +1,6 @@
-# Fetches the CatalogTool pinned in catalogtool.env, checks its SHA-256 on the downloaded bytes
-# and proves that it runs and names the pinned version before anything trusts it (S-08, S-17,
-# O-07). Shared by every workflow of this repository, so the steps exist once (C-01).
+# Fetches the CatalogTool pinned in hosting.env, checks its SHA-256 on the downloaded bytes and
+# proves that it runs and names the pinned version before anything trusts it (S-08, S-17, O-07).
+# Shared by every workflow of this repository, so the steps exist once (C-01).
 
 name: CatalogTool
 description: Download and verify the pinned Linux CatalogTool.
@@ -9,6 +9,9 @@ outputs:
   path:
     description: Absolute path of the verified CatalogTool.
     value: ${{ steps.fetch.outputs.path }}
+  deploy-base:
+    description: DEPLOY_BASE from hosting.env, checked.
+    value: ${{ steps.fetch.outputs.deploy-base }}
 
 runs:
   using: composite
@@ -17,16 +20,33 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        version="$(sed -n 's/^CATALOGTOOL_VERSION=//p' catalogtool.env)"
-        sha256="$(sed -n 's/^CATALOGTOOL_LINUX_SHA256=//p' catalogtool.env)"
-        if [ -z "$version" ] || [ -z "$sha256" ]; then
-          echo "::error::catalogtool.env pins no CatalogTool yet. The catalog checks cannot run, so this gate fails (R-23)."
+        value() { sed -n "s/^$1=//p" hosting.env; }
+        base="$(value DEPLOY_BASE)"
+        dir="$(value CATALOGTOOL_DIR)"
+        version="$(value CATALOGTOOL_VERSION)"
+        sha256="$(value CATALOGTOOL_LINUX_SHA256)"
+        if [ -z "$base" ] || [ -z "$dir" ] || [ -z "$version" ] || [ -z "$sha256" ]; then
+          echo "::error::hosting.env pins no CatalogTool yet. The catalog checks cannot run, so this gate fails (R-23)."
           exit 1
         fi
-        if ! printf '%s' "$version" | grep -Eq '^[0-9]+(\.[0-9]+){2}$'; then
+        if ! printf '%s' "$base" | grep -Eq '^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?/$'; then
+          echo "::error::DEPLOY_BASE '$base' is not an https address of a host ending in /."
+          exit 1
+        fi
+        if ! printf '%s' "$dir" | grep -Eq '^(test/[0-9a-f]{7,40}|[0-9]+\.[0-9]+\.[0-9]+)$'; then
+          echo "::error::CATALOGTOOL_DIR '$dir' is neither test/<commit> nor a version like 1.2.3."
+          exit 1
+        fi
+        if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
           echo "::error::CATALOGTOOL_VERSION '$version' is not a version like 1.2.3."
           exit 1
         fi
+        case "$dir" in test/*) ;; *)
+          if [ "$dir" != "$version" ]; then
+            echo "::error::A release folder must be the pinned version: '$dir' against '$version'."
+            exit 1
+          fi ;;
+        esac
         if ! printf '%s' "$sha256" | grep -Eq '^[0-9a-f]{64}$'; then
           echo "::error::CATALOGTOOL_LINUX_SHA256 is not 64 lowercase hex digits."
           exit 1
@@ -34,8 +54,8 @@ runs:
 
         mkdir -p tools
         tool="$PWD/tools/catalogtool"
-        url="https://deploy.miralsoft.com/catalogtool/$version/MiralDeploy.CatalogTool-linux-x64"
-        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 0 \
+        url="${base}catalogtool/$dir/MiralDeploy.CatalogTool-linux-x64"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --max-redirs 0 \
           --max-filesize 200000000 --retry 3 --output "$tool" "$url"
         echo "$sha256  $tool" | sha256sum --check --strict -
         chmod +x "$tool"
@@ -46,3 +66,4 @@ runs:
           exit 1
         fi
         echo "path=$tool" >> "$GITHUB_OUTPUT"
+        echo "deploy-base=$base" >> "$GITHUB_OUTPUT"
