@@ -5,4 +5,8 @@
 # Used only by `CatalogTool verify` in the publishing workflow. The private halves are kept
 # offline by the owner and never come near this repository.
 #
-# Empty until the owner generates the real keys: publishing refuses to run without them.
+# TEST PHASE (foundation test-phase.md): the keys below are the TEST root keys, generated on
+# 2026-11-16. Programs with the real root keys refuse everything they sign. They are replaced by
+# the real keys at the switch before the first release.
+BDvta7VJpO+6JXBHTC6TZbUsfRav+oLyflnrFpV90GAxq3aAQrziUyTbxT9fQRGiv2pkKIZG+XqzUD0kVIraqjU=
+BOCOoZw9IdtPch/fuDZmoXOmsbdjWmJeeTLQ+cTpRfnte8XWKf63XF2TybSm+hZuI7tOkSlgqthanYl0W0z6r1Y=

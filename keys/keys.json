@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "keysVersion": 1,
+  "issued": "2026-11-16T12:32:32+00:00",
+  "keys": [
+    {
+      "keyId": "ba588f503b2bcbab",
+      "algorithm": "ecdsa-p256-sha256",
+      "publicKey": "BOLU+ZMG4LsT07K0SJnE1QgPFnpZjofUAIq04BQts1wEHa6msycLU3FjUKCmpMLpsGTLECQ6gjl4nBBBrWq1tIE="
+    }
+  ]
+}
