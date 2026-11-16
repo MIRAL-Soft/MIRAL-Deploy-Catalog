@@ -2,3 +2,8 @@
 # The catalog files have a normal form with LF line ends (CatalogReader.WriteItem), and a
 # conversion on checkout would change bytes that are signed and compared.
 * text=auto eol=lf
+
+# Signed files are bytes, not text: git must store and check them out exactly as they were
+# signed, or the signature fails. keys.json is written in LF before it is signed.
+keys/keys.json -text
+*.sig -text
