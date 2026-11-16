@@ -83,6 +83,19 @@ jobs:
           fi
           "$TOOL" check --repo . --online "${args[@]}"
 
+  # A job of its own, so it runs whatever state the catalog is in: it uses only the test catalog in
+  # tests/chain and proves on every run that the signing chain works on the runner.
+  chain:
+    name: Signing chain dry run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - id: tool
+        uses: ./.github/actions/catalogtool
+
       # The signing chain end to end with throwaway keys (tests/chain/README.md). It first has to
       # refuse a tampered catalog and a wrong root key (R-20), then accept the real thing.
       - name: Signing chain dry run
